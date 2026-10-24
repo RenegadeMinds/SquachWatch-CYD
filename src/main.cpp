@@ -9091,6 +9091,7 @@ void loop() {
                         case LoraHomeHit::TAB_MESHTASTIC:  uiLoraHomeSetNet(0); break;
                         case LoraHomeHit::TAB_MESHCORE:    uiLoraHomeSetNet(1); break;
                         case LoraHomeHit::TAB_DMS:         uiLoraHomeShowDms(); break;
+                        case LoraHomeHit::RADAR_DOT:       uiLoraChatOpenDm(uiLoraHomeTappedPeer()); enterLoraChat(); break;
                         case LoraHomeHit::CHAT_DMS: {
                             // A conversation: open it; the empty part of the window: the list.
                             const uint32_t peer = uiLoraHomeDmPeerAt(gestureStartY);

@@ -630,7 +630,21 @@ void drawStrip(TFT_eSPI& t, uint32_t now, const Numbers& n, uint32_t dt) {
 
 
 // ---- the dish ------------------------------------------------------------------
-struct Blip { float x, y; bool known, direct; Lora::Proto proto; float miles; const char* tag; float bearing; };
+struct Blip { float x, y; bool known, direct; Lora::Proto proto; float miles; const char* tag; float bearing; uint64_t id; };
+
+// Where each dot was drawn this frame, for a tap on the dish: the nearest
+// Meshtastic dot within a fingertip opens a private conversation with it
+// (asked for 2026-10-23). Dots are 9 px across; the reach is wider because a
+// finger is.
+struct Dot { int16_t x, y; Lora::Proto proto; uint64_t id; };
+Dot      s_dots[32];
+uint8_t  s_dotN = 0;
+const int DOT_REACH = 14;
+uint32_t s_tapPeer = 0;
+// A dot just tapped rings for a moment: on MeshCore, where there are no DMs
+// yet, that and a line in the compose box are all a tap does.
+int16_t  s_ringX = 0, s_ringY = 0;
+uint32_t s_ringAt = 0;
 
 const char* compass(float deg) {
     static const char* N[8] = { "N", "NE", "E", "SE", "S", "SW", "W", "NW" };
@@ -715,6 +729,7 @@ void drawDish(TFT_eSPI& t, uint32_t now) {
         if (now - n.lastMs > 3600000u) continue;       // an hour: the dish is who is around now
         Blip& b = blips[nb];
         b.proto = n.proto; b.direct = n.directPackets > 0; b.tag = n.name[0] ? n.name : n.tag; b.known = false; b.miles = 0; b.bearing = 0;
+        b.id = n.id;
         if (haveFix && n.hasPos) {
             const float lat0 = fix.lat7 / 1e7f, lat1 = n.latE7 / 1e7f;
             const float dy = (lat1 - lat0) * 69.0f;                                  // miles per degree
@@ -744,10 +759,12 @@ void drawDish(TFT_eSPI& t, uint32_t now) {
     }
     uint8_t labels = 0;
     int placedY[3] = { -99, -99, -99 };
+    s_dotN = 0;
     for (uint8_t oi = 0; oi < nb; oi++) {
         const Blip& b = blips[order[oi]];
         const uint16_t c = netCol(b.proto);
         const int x = (int)lroundf(b.x), y = (int)lroundf(b.y);
+        if (s_dotN < sizeof s_dots / sizeof s_dots[0]) s_dots[s_dotN++] = Dot{ (int16_t)x, (int16_t)y, b.proto, b.id };
         if (b.known) {
             t.fillCircle(x, y, 4, dim(c, 60));
             if (b.direct) t.fillCircle(x, y, 2, c); else t.drawCircle(x, y, 2, c);
@@ -767,6 +784,11 @@ void drawDish(TFT_eSPI& t, uint32_t now) {
         } else {
             if (b.direct) t.fillCircle(x, y, 1, dim(c, 190)); else t.drawCircle(x, y, 2, dim(c, 150));
         }
+    }
+    // The ring round a dot just tapped.
+    if (s_ringAt && now - s_ringAt < 600) {
+        const int r = 5 + (int)((now - s_ringAt) / 60);
+        t.drawCircle(s_ringX, s_ringY, r, Theme::VAPOR_YELLOW);
     }
     t.fillCircle(cx, cy, 2, Theme::WHITE);
     // Just inside the rim: above it, it sat on the Meshtastic preset line.
@@ -959,6 +981,7 @@ void uiLoraHomeInit(TFT_eSPI& t) {
 
 void uiLoraHomeToggleNet() { s_net = (uint8_t)(s_net ? 0 : 1); s_dmTab = false; }
 void uiLoraHomeShowDms() { s_dmTab = true; }
+uint32_t uiLoraHomeTappedPeer() { return s_tapPeer; }
 uint32_t uiLoraHomeDmPeerAt(int y) {
     if (!s_ps || !s_dmTab || y < CHAT_ROWS_Y) return 0;
     const int i = (y - CHAT_ROWS_Y) / CHAT_ROW_H;
@@ -1006,6 +1029,28 @@ LoraHomeHit uiLoraHomeHit(TFT_eSPI& t, int x, int y) {
     // LORA SETTINGS, the icon top-left: a finger's box over it, clear of the
     // LIVE tag and above the dish.
     if (y < 22 && x < 50) return LoraHomeHit::SETTINGS;
+    // A dot on the dish: the nearest within reach.
+    {
+        const int dx0 = x - DISH_CX, dy0 = y - DISH_CY;
+        if (dx0 * dx0 + dy0 * dy0 <= (DISH_R + DOT_REACH) * (DISH_R + DOT_REACH)) {
+            int best = -1, bestD = DOT_REACH * DOT_REACH + 1;
+            for (uint8_t i = 0; i < s_dotN; i++) {
+                const int ddx = x - s_dots[i].x, ddy = y - s_dots[i].y, d = ddx * ddx + ddy * ddy;
+                if (d < bestD) { bestD = d; best = i; }
+            }
+            if (best >= 0) {
+                const Dot& d = s_dots[best];
+                s_ringX = d.x; s_ringY = d.y; s_ringAt = millis();
+                if (d.proto == Lora::Proto::MESHTASTIC && d.id && d.id <= 0xFFFFFFFFull) {
+                    s_tapPeer = (uint32_t)d.id;
+                    return LoraHomeHit::RADAR_DOT;
+                }
+                snprintf(s_status, sizeof s_status, "MESHCORE DMs: NOT YET");
+                s_statusAt = millis();
+                return LoraHomeHit::NONE;
+            }
+        }
+    }
     // The switch, all of its double height and a little round it.
     if (y >= COMPOSE_Y - 2 && x >= s_switchX - 6) return LoraHomeHit::SWITCH;
     // The channel chip, its own height and a little round it, up to where

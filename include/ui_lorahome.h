@@ -22,7 +22,7 @@
 #include <stdint.h>
 
 enum class LoraHomeHit : uint8_t { NONE = 0, CHAT_MESHTASTIC, CHAT_MESHCORE, SWITCH, CHATS, BACK,
-                                   TAB_MESHTASTIC, TAB_MESHCORE, SETTINGS, CHANNEL, TAB_DMS, CHAT_DMS };
+                                   TAB_MESHTASTIC, TAB_MESHCORE, SETTINGS, CHANNEL, TAB_DMS, CHAT_DMS, RADAR_DOT };
 
 void        uiLoraHomeInit(TFT_eSPI& t);
 void        uiLoraHomeTick(TFT_eSPI& t, uint32_t now);
@@ -41,6 +41,8 @@ void        uiLoraHomeSetNet(uint8_t net);
 // (0 = no row there).
 void        uiLoraHomeShowDms();
 uint32_t    uiLoraHomeDmPeerAt(int y);
+// RADAR_DOT: the Meshtastic node whose dot on the dish was tapped.
+uint32_t    uiLoraHomeTappedPeer();
 uint8_t     uiLoraHomeNet();
 // The keyboard while the page is up: printable keys type, '\b' deletes,
 // '\n' sends what is typed on the switch's network.
