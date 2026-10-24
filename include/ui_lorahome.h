@@ -22,7 +22,7 @@
 #include <stdint.h>
 
 enum class LoraHomeHit : uint8_t { NONE = 0, CHAT_MESHTASTIC, CHAT_MESHCORE, SWITCH, CHATS, BACK,
-                                   TAB_MESHTASTIC, TAB_MESHCORE, SETTINGS, CHANNEL };
+                                   TAB_MESHTASTIC, TAB_MESHCORE, SETTINGS, CHANNEL, TAB_DMS, CHAT_DMS };
 
 void        uiLoraHomeInit(TFT_eSPI& t);
 void        uiLoraHomeTick(TFT_eSPI& t, uint32_t now);
@@ -37,6 +37,10 @@ void        uiLoraHomeToggleNet();
 void        uiLoraHomeStepChannel(uint32_t now);
 // The chat window's tabs and the switch are one setting: 0 Meshtastic, 1 MeshCore.
 void        uiLoraHomeSetNet(uint8_t net);
+// The DMs tab of the chat window, and the conversation on the row at `y`
+// (0 = no row there).
+void        uiLoraHomeShowDms();
+uint32_t    uiLoraHomeDmPeerAt(int y);
 uint8_t     uiLoraHomeNet();
 // The keyboard while the page is up: printable keys type, '\b' deletes,
 // '\n' sends what is typed on the switch's network.

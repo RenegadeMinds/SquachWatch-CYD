@@ -39,11 +39,13 @@ const int STRIP_Y = 59, STRIP_H = 46;
 const int INFO_Y = 109;
 const int CHAT_Y = 120, CHAT_TAB_H = 14, CHAT_BOTTOM = 212, CHAT_ROW_H = 12;
 const int CHAT_ROWS_Y = CHAT_Y + CHAT_TAB_H + 2;
+const int TAB_W = 104;                         // three tabs across the 312-wide window
 const int COMPOSE_Y = 213, COMPOSE_H = 12;
 const int BAR_Y = 226;
 
 // ---- state -----------------------------------------------------------------
 uint8_t  s_net = 0;                      // the switch: 0 Meshtastic, 1 MeshCore
+bool     s_dmTab = false;                // the chat window shows the DM conversations
 char     s_compose[161] = { 0 };
 uint8_t  s_composeN = 0;
 char     s_status[40] = { 0 };
@@ -160,7 +162,8 @@ const uint8_t SNAP_NODES = 32;                    // plenty for a dish this size
 // and its internal RAM is what the radios and the frame push live on.
 struct PageSnap {
     Lora::Nodes::Node nodes[SNAP_NODES], nodesTmp[SNAP_NODES];
-    Lora::Msgs::Msg   keep[2][6], keepTmp[2][6];
+    // [0] Meshtastic, [1] MeshCore, [2] the DM conversations, one row each.
+    Lora::Msgs::Msg   keep[3][6], keepTmp[3][6];
     Lora::Packet      pkt;
 };
 PageSnap*  s_ps = nullptr;
@@ -168,8 +171,8 @@ uint8_t    s_pNodeN = 0;
 uint32_t   s_pNodesAt = 0;
 bool       s_pHavePkt = false;
 uint32_t   s_pPktAt = 0;
-uint8_t    s_pKept[2] = { 0, 0 };
-uint16_t   s_pCount[2] = { 0, 0 };
+uint8_t    s_pKept[3] = { 0, 0, 0 };
+uint16_t   s_pCount[3] = { 0, 0, 0 };
 uint32_t   s_pMsgAt = 0;
 
 void refreshSnapshot(uint32_t now, bool force) {
@@ -194,14 +197,26 @@ void refreshSnapshot(uint32_t now, bool force) {
     if (force || now - s_pMsgAt >= 500) {
         // A walk that hits a timeout part-way is thrown away whole.
         auto& keep = s_ps->keepTmp;
-        uint8_t kept[2] = { 0, 0 };
-        uint16_t count[2] = { 0, 0 };
+        uint8_t kept[3] = { 0, 0, 0 };
+        uint16_t count[3] = { 0, 0, 0 };
         const int lines = (CHAT_BOTTOM - CHAT_ROWS_Y) / CHAT_ROW_H;
         const uint16_t n = Lora::msgCount();
         Lora::Msgs::Msg m;
         bool ok = true;
         for (uint16_t i = 0; i < n; i++) {
             if (!Lora::msgAt(i, m)) { ok = false; break; }
+            if (m.proto == Lora::Proto::MESHTASTIC && m.chan == Lora::Msgs::DM_CHAN) {
+                // A DM: one row a conversation, its newest line; ours named
+                // by whom it went to.
+                count[2]++;
+                bool have = false;
+                for (uint8_t k = 0; k < kept[2] && !have; k++) have = keep[2][k].peer == m.peer;
+                if (!have && kept[2] < lines && kept[2] < 6) {
+                    if (m.mine) Lora::nodeName(m.peer, m.sender, sizeof m.sender);
+                    keep[2][kept[2]++] = m;
+                }
+                continue;
+            }
             const int c = m.proto == Lora::Proto::MESHTASTIC ? 0 : m.proto == Lora::Proto::MESHCORE ? 1 : -1;
             if (c < 0) continue;
             count[c]++;
@@ -209,8 +224,7 @@ void refreshSnapshot(uint32_t now, bool force) {
         }
         if (ok) {
             memcpy(s_ps->keep, keep, sizeof keep);
-            s_pKept[0] = kept[0]; s_pKept[1] = kept[1];
-            s_pCount[0] = count[0]; s_pCount[1] = count[1];
+            for (int k = 0; k < 3; k++) { s_pKept[k] = kept[k]; s_pCount[k] = count[k]; }
             s_pMsgAt = now;
         }
     }
@@ -802,22 +816,26 @@ void drawChatRain(TFT_eSPI& t) {
 // open tab is the network the compose line sends to: one switch for both.
 void drawChats(TFT_eSPI& t, uint32_t now) {
     if (!s_ps) return;
-    const uint16_t cols[2] = { Theme::CYAN, Theme::PINK };
-    const char* names[2] = { "MESHTASTIC", "MESHCORE" };
-    const uint8_t c = s_net;
+    const uint16_t cols[3] = { Theme::CYAN, Theme::PINK, Theme::VAPOR_YELLOW };
+    const char* names[3] = { "MESHTASTIC", "MESHCORE", "DMs" };
+    const uint8_t c = s_dmTab ? 2 : s_net;
+    const uint16_t dmUnread = uiLoraChatDmUnread();
     t.drawRect(4, CHAT_Y, 312, CHAT_BOTTOM - CHAT_Y, dim(cols[c], 110));
     t.setTextFont(1); t.setTextSize(1);
-    for (int k = 0; k < 2; k++) {
-        const int x0 = k ? 160 : 4, w = 156;
+    for (int k = 0; k < 3; k++) {
+        const int x0 = 4 + k * TAB_W, w = TAB_W;
         const bool on = k == c;
-        if (on) t.fillRect(x0 + 1, CHAT_Y + 1, w - 2, CHAT_TAB_H - 1, dim(cols[k], 60));
-        else    t.fillRect(x0 + 1, CHAT_Y + 1, w - 2, CHAT_TAB_H - 1, dim(cols[k], 14));
+        // Unread DMs light their tab even while another is open.
+        const bool hot = k == 2 && dmUnread && !on;
+        const uint16_t fill = on ? dim(cols[k], 60) : hot ? dim(cols[k], 110) : dim(cols[k], 14);
+        t.fillRect(x0 + 1, CHAT_Y + 1, w - 2, CHAT_TAB_H - 1, fill);
         char lab[24];
-        snprintf(lab, sizeof lab, "%s %u", names[k], (unsigned)s_pCount[k]);
-        small(t, x0 + (w - t.textWidth(lab)) / 2, CHAT_Y + 4, lab, on ? Theme::WHITE : dim(cols[k], 150), on ? dim(cols[k], 60) : dim(cols[k], 14));
+        snprintf(lab, sizeof lab, "%s %u", names[k], (unsigned)(k == 2 && dmUnread ? dmUnread : s_pCount[k]));
+        small(t, x0 + (w - t.textWidth(lab)) / 2, CHAT_Y + 4, lab, on || hot ? Theme::WHITE : dim(cols[k], 150), fill);
     }
     t.drawFastHLine(5, CHAT_Y + CHAT_TAB_H, 310, dim(cols[c], 110));
-    t.drawFastVLine(160, CHAT_Y + 1, CHAT_TAB_H - 1, dim(Theme::WHITE, 40));
+    t.drawFastVLine(4 + TAB_W, CHAT_Y + 1, CHAT_TAB_H - 1, dim(Theme::WHITE, 40));
+    t.drawFastVLine(4 + 2 * TAB_W, CHAT_Y + 1, CHAT_TAB_H - 1, dim(Theme::WHITE, 40));
     // Something unread: a small badge at the far end of the tabs.
     const uint16_t unread = uiLoraChatUnread();
     if (unread) {
@@ -827,7 +845,8 @@ void drawChats(TFT_eSPI& t, uint32_t now) {
         small(t, 316 - bw, CHAT_Y + 3, badge, Theme::BLACK, Theme::VAPOR_YELLOW);
     }
     if (!s_pKept[c]) {
-        small(t, 10, CHAT_ROWS_Y + 4, c ? "no MeshCore messages yet" : "no Meshtastic messages yet", dim(Theme::WHITE, 120));
+        small(t, 10, CHAT_ROWS_Y + 4, c == 2 ? "no private messages yet: tap a Meshtastic line to start one"
+                                     : c ? "no MeshCore messages yet" : "no Meshtastic messages yet", dim(Theme::WHITE, 120));
         return;
     }
     for (uint8_t i = 0; i < s_pKept[c]; i++) {
@@ -839,9 +858,11 @@ void drawChats(TFT_eSPI& t, uint32_t now) {
         age(now, r.ms, ago, sizeof ago);
         const uint16_t bg = i == 0 ? dim(cols[c], 22) : Theme::BG;
         t.setTextColor(cols[c], bg); t.setCursor(8, y + 1); t.print(who);
+        // A conversation with something we have not read: NEW after the name.
+        if (c == 2 && !r.mine && r.ms > uiLoraChatDmSeenMs(r.peer)) { t.setTextColor(Theme::WHITE, bg); t.print(" NEW"); }
         const int tx = t.getCursorX() + 6;
         const int agoW = t.textWidth(ago);
-        char text[64]; snprintf(text, sizeof text, "%s", r.text);
+        char text[64]; snprintf(text, sizeof text, "%s%s", c == 2 && r.mine ? "you: " : "", r.text);
         size_t tn = strlen(text);
         while (tn && tx + t.textWidth(text) > 316 - 8 - agoW) text[--tn] = '\0';
         t.setTextColor(Theme::WHITE, bg); t.setCursor(tx, y + 1); t.print(text);
@@ -854,6 +875,7 @@ Lora::Proto netProto() { return s_net ? Lora::Proto::MESHCORE : Lora::Proto::MES
 
 // The chip's words: the channel Enter sends on, cut to CHIP_CHARS.
 void chipLabel(char* out, size_t cap) {
+    if (s_dmTab) { snprintf(out, cap, "PRIVATE"); return; }
     const Lora::Proto p = netProto();
     char name[24];
     Lora::Chan::txName(p, Lora::Chan::txPick(p), name, sizeof name);
@@ -864,7 +886,7 @@ void chipLabel(char* out, size_t cap) {
 // The compose line now ends where the chip begins: the chip's width is set
 // by its name, so the line is measured first and drawn second.
 void drawCompose(TFT_eSPI& t, uint32_t now) {
-    const uint16_t accent = s_net ? Theme::PINK : Theme::CYAN;
+    const uint16_t accent = s_dmTab ? Theme::VAPOR_YELLOW : s_net ? Theme::PINK : Theme::CYAN;
     char chip[24];
     chipLabel(chip, sizeof chip);
     t.setTextFont(1); t.setTextSize(1);
@@ -877,6 +899,8 @@ void drawCompose(TFT_eSPI& t, uint32_t now) {
     t.drawRoundRect(4, COMPOSE_Y, w, COMPOSE_H, 2, dim(accent, 150));
     if (s_status[0] && now - s_statusAt < 2500) {
         smallClipBg(t, 8, COMPOSE_Y + 2, s_status, Theme::VAPOR_YELLOW, bg, w - 8);
+    } else if (s_dmTab) {
+        smallClipBg(t, 8, COMPOSE_Y + 2, "TAP A NAME TO MESSAGE THEM", dim(Theme::VAPOR_YELLOW, 170), bg, w - 8);
     } else if (!Settings::loraTxDbm() && !s_composeN) {
         smallClipBg(t, 8, COMPOSE_Y + 2, "LORA TX IS OFF: SETTINGS", dim(Theme::WHITE, 120), bg, w - 8);
     } else if (!s_composeN) {
@@ -933,8 +957,15 @@ void uiLoraHomeInit(TFT_eSPI& t) {
 
 }
 
-void uiLoraHomeToggleNet() { s_net = (uint8_t)(s_net ? 0 : 1); }
+void uiLoraHomeToggleNet() { s_net = (uint8_t)(s_net ? 0 : 1); s_dmTab = false; }
+void uiLoraHomeShowDms() { s_dmTab = true; }
+uint32_t uiLoraHomeDmPeerAt(int y) {
+    if (!s_ps || !s_dmTab || y < CHAT_ROWS_Y) return 0;
+    const int i = (y - CHAT_ROWS_Y) / CHAT_ROW_H;
+    return i < s_pKept[2] ? s_ps->keep[2][i].peer : 0;
+}
 void uiLoraHomeStepChannel(uint32_t now) {
+    if (s_dmTab) { snprintf(s_status, sizeof s_status, "TAP A NAME FIRST"); s_statusAt = now; return; }
     const Lora::Proto p = netProto();
     const uint8_t was = Lora::Chan::txPick(p);
     if (Lora::Chan::txStep(p) == was) {
@@ -943,7 +974,7 @@ void uiLoraHomeStepChannel(uint32_t now) {
         s_statusAt = now;
     }
 }
-void uiLoraHomeSetNet(uint8_t net) { s_net = net ? 1 : 0; }
+void uiLoraHomeSetNet(uint8_t net) { s_net = net ? 1 : 0; s_dmTab = false; }
 uint8_t uiLoraHomeNet() { return s_net; }
 
 void uiLoraHomeTick(TFT_eSPI& t, uint32_t now) {
@@ -982,8 +1013,10 @@ LoraHomeHit uiLoraHomeHit(TFT_eSPI& t, int x, int y) {
     if (y >= COMPOSE_Y - 3 && y < COMPOSE_Y + COMPOSE_H + 2 && x >= s_chipX - 3) return LoraHomeHit::CHANNEL;
     if (y >= BAR_Y - 4) return x < 80 ? LoraHomeHit::CHATS : LoraHomeHit::NONE;
     if (y >= COMPOSE_Y - 2) return LoraHomeHit::NONE;
-    if (y >= CHAT_Y - 2 && y < CHAT_Y + CHAT_TAB_H + 2) return x < 160 ? LoraHomeHit::TAB_MESHTASTIC : LoraHomeHit::TAB_MESHCORE;
-    if (y >= CHAT_Y + CHAT_TAB_H + 2 && y < COMPOSE_Y - 2) return s_net ? LoraHomeHit::CHAT_MESHCORE : LoraHomeHit::CHAT_MESHTASTIC;
+    if (y >= CHAT_Y - 2 && y < CHAT_Y + CHAT_TAB_H + 2)
+        return x < 4 + TAB_W ? LoraHomeHit::TAB_MESHTASTIC : x < 4 + 2 * TAB_W ? LoraHomeHit::TAB_MESHCORE : LoraHomeHit::TAB_DMS;
+    if (y >= CHAT_Y + CHAT_TAB_H + 2 && y < COMPOSE_Y - 2)
+        return s_dmTab ? LoraHomeHit::CHAT_DMS : s_net ? LoraHomeHit::CHAT_MESHCORE : LoraHomeHit::CHAT_MESHTASTIC;
     return LoraHomeHit::NONE;
 }
 
@@ -991,6 +1024,7 @@ void uiLoraHomeKey(char c, uint32_t now) {
     if (c == '\b') { if (s_composeN) s_compose[--s_composeN] = '\0'; return; }
     if (c == '\n') {
         if (!s_composeN) return;
+        if (s_dmTab) { snprintf(s_status, sizeof s_status, "TAP A NAME FIRST"); s_statusAt = now; return; }
         if (!Settings::loraTxDbm()) { snprintf(s_status, sizeof s_status, "LORA TX IS OFF: SETTINGS"); s_statusAt = now; return; }
         // LORA SETTINGS' NAME, else the squad nickname (include/lora_myname.h),
         // on the channel the chip shows.

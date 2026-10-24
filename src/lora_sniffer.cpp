@@ -1109,6 +1109,17 @@ uint8_t dmState(uint32_t id) {
     return s;
 }
 
+void nodeName(uint32_t num, char* out, size_t cap) {
+    if (!out || !cap) return;
+    char name[40];
+    out[0] = ' ';
+    if (s_lock && xSemaphoreTake(s_lock, pdMS_TO_TICKS(20)) == pdTRUE) {
+        if (!Names::lookup(num, out, cap, name, sizeof name)) out[0] = ' ';
+        xSemaphoreGive(s_lock);
+    }
+    if (!out[0]) snprintf(out, cap, "!%08lx", (unsigned long)num);
+}
+
 bool dmHasKey(uint32_t num) {
     if (!s_lock || xSemaphoreTake(s_lock, pdMS_TO_TICKS(20)) != pdTRUE) return false;
     const bool k = Dm::hasKey(num);

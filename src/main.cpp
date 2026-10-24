@@ -9063,7 +9063,9 @@ void loop() {
                     const LoraChatHit hit = uiLoraChatHit(*canvas, gestureStartX, gestureStartY);
                     if (hit == LoraChatHit::TAB_MESHTASTIC) uiLoraChatSelect(0);
                     else if (hit == LoraChatHit::TAB_MESHCORE) uiLoraChatSelect(1);
+                    else if (hit == LoraChatHit::TAB_DMS) uiLoraChatSelect(2);
                     else if (hit == LoraChatHit::CHANNEL) uiLoraChatStepChannel(now);
+                    else uiLoraChatTap(gestureStartX, gestureStartY, now);
                 }
             }
             break;
@@ -9088,6 +9090,14 @@ void loop() {
                         case LoraHomeHit::SWITCH:          uiLoraHomeToggleNet(); break;
                         case LoraHomeHit::TAB_MESHTASTIC:  uiLoraHomeSetNet(0); break;
                         case LoraHomeHit::TAB_MESHCORE:    uiLoraHomeSetNet(1); break;
+                        case LoraHomeHit::TAB_DMS:         uiLoraHomeShowDms(); break;
+                        case LoraHomeHit::CHAT_DMS: {
+                            // A conversation: open it; the empty part of the window: the list.
+                            const uint32_t peer = uiLoraHomeDmPeerAt(gestureStartY);
+                            if (peer) uiLoraChatOpenDm(peer); else uiLoraChatSelect(2);
+                            enterLoraChat();
+                            break;
+                        }
                         case LoraHomeHit::SETTINGS:        enterLoraSettings(true); break;
                         case LoraHomeHit::CHANNEL:         uiLoraHomeStepChannel(now); break;
                         default: break;

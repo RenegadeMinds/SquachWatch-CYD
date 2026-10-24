@@ -1089,6 +1089,7 @@ int main(int argc, char** argv) {
         simLoraPick(lc.net);
         uiLoraHomeInit(frame);
         uiLoraHomeSetNet(lc.net);
+        if (tabIdx == 2) uiLoraHomeShowDms();     // --tab 2: the DMs tab
     }
     else if (screen == "lorachat") {
         SimLora::Config lc;
@@ -1098,7 +1099,9 @@ int main(int argc, char** argv) {
         for (int g = 0; g < 3 && (Settings::loraTxDbm() != 0) != tx; g++) Settings::cycleLoraTx();
         SimLora::begin(lc);
         simLoraPick(lc.net);
-        uiLoraChatSelect(lc.net);
+        uiLoraChatSelect(tabIdx == 2 ? 2 : lc.net);
+        // --tab 2: the DMs list; SQUACHSIM_DMPEER=3b1c9a00 opens that conversation.
+        if (const char* dp = getenv("SQUACHSIM_DMPEER")) uiLoraChatOpenDm((uint32_t)strtoul(dp, nullptr, 16));
         uiLoraChatInit(frame);
     }
     else if (screen == "lorasettings") {
