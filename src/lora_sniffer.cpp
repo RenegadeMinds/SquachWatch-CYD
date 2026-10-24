@@ -27,6 +27,8 @@
 #include "lora_ident.h"
 #include "lora_names.h"
 #include "lora_myname.h"
+#include "lora_dm.h"
+#include "squachy.h"
 #include "clock.h"
 #include <Preferences.h>
 #include "settings.h"
@@ -513,6 +515,82 @@ static void namesSave(uint32_t now) {
     free(buf);
 }
 
+// ---- Meshtastic direct messages (Lora::Dm) -----------------------------------
+// Our X25519 key pair is made once, on the first boot that has a radio, and
+// kept in the 'loradm' NVS namespace: a node whose key changed is a stranger
+// to every Meshtastic node that knew it (NodeDB keeps the first key it
+// heard), so it must survive a restart. The keys of the nodes we talk to are
+// kept beside it, written back like the names, at most once a minute. The
+// duress wipe erases the whole partition, these with it.
+static const char* DM_NS = "loradm";
+static void dmTick(uint32_t now);
+static uint32_t    s_dmKeysSavedAt = 0;
+
+static uint32_t myMeshtasticNum() { return 0x5A5A0000u | (uint32_t)(ESP.getEfuseMac() & 0xFFFF); }
+static void dmRandom(uint8_t* out, size_t n) { esp_fill_random(out, n); }
+
+// A DM's state moved on: its chat row's mark follows. Under the lock: this
+// runs inside whichever Dm call moved it.
+static void dmOnState(uint32_t id, uint32_t to, Dm::State s, uint8_t err) {
+    Msgs::setDmState(id, (uint8_t)s);
+    static const char* const NAMES[] = { "-", "sending", "DELIVERED", "FAILED", "waiting for their key" };
+    Serial.printf("[lora] DM %08lx to !%08lx: %s (reason %u)\n", (unsigned long)id, (unsigned long)to,
+                  (unsigned)s < 5 ? NAMES[s] : "?", (unsigned)err);
+}
+
+// Every Meshtastic frame, decoded once, on the radio task inside the lock.
+static void dmHook(const Meshtastic::Decoded& d, uint32_t now) { Dm::onFrame(d, now, Settings::loraHops()); }
+
+static void dmRestore() {
+    uint8_t priv[32];
+    bool have = false;
+    uint8_t* keys = nullptr;
+    size_t keysLen = 0;
+    {
+        Preferences p;
+        if (p.begin(DM_NS, true)) {
+            have = p.getBytes("priv", priv, 32) == 32;
+            keysLen = p.getBytesLength("keys");
+            if (keysLen && (keys = (uint8_t*)malloc(keysLen)) != nullptr && p.getBytes("keys", keys, keysLen) != keysLen) keysLen = 0;
+            p.end();
+        }
+    }
+    const bool fresh = Dm::begin(myMeshtasticNum(), have ? priv : nullptr, dmRandom);
+    memset(priv, 0, sizeof priv);
+    if (fresh) {
+        Preferences w;
+        if (w.begin(DM_NS, false)) { w.putBytes("priv", Dm::privateKey(), 32); w.end(); }
+    }
+    if (keys && keysLen) Dm::loadKeys(keys, keysLen);
+    free(keys);
+    Meshtastic::setPkiOpener(Dm::open);
+    Nodes::setMeshtasticHook(dmHook);
+    Dm::onState(dmOnState);
+    const uint8_t* pub = Dm::publicKey();
+    Serial.printf("[lora] DM key %02x%02x%02x%02x... %s; %u Meshtastic keys remembered\n",
+                  pub[0], pub[1], pub[2], pub[3], fresh ? "made and saved" : "loaded", (unsigned)Dm::keyCount());
+}
+
+static void dmKeysSave(uint32_t now) {
+    if (!Dm::ready() || !Dm::keysDirty() || now < 30000u) return;
+    if (s_dmKeysSavedAt && now - s_dmKeysSavedAt < 60000u) return;
+    const size_t cap = Dm::keysBytesNeeded();
+    uint8_t* buf = (uint8_t*)malloc(cap);
+    if (!buf) return;
+    size_t n = 0;
+    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(20)) == pdTRUE) {
+        n = Dm::saveKeys(buf, cap);
+        if (n) Dm::keysSaved();
+        xSemaphoreGive(s_lock);
+    }
+    if (n) {
+        Preferences p;
+        if (p.begin(DM_NS, false)) { p.putBytes("keys", buf, n); p.end(); }
+        s_dmKeysSavedAt = now;
+    }
+    free(buf);
+}
+
 // CLEAN UP on LORA SETTINGS. Both under the lock the radio task writes them in.
 void clearChats() {
     if (!s_lock || xSemaphoreTake(s_lock, pdMS_TO_TICKS(200)) != pdTRUE) return;
@@ -536,6 +614,7 @@ bool begin() {
     // Before the radio, like the channel keys below: the names are the
     // decoders', and the radio task is not running yet to race this.
     namesRestore();
+    dmRestore();
     memset(&s_stats, 0, sizeof s_stats);
     // The request log exists before the first request can be issued, which is
     // the point of it: an empty log is a claim the owner can check.
@@ -702,6 +781,8 @@ static void enrichScan(uint32_t now) {
 void tick(uint32_t now) {
     if (!s_present) return;
     namesSave(now);
+    dmKeysSave(now);
+    dmTick(now);
     enrichScan(now);
     // Starts a short-lived worker when there is something to ask and WiFi is
     // already up for another reason; does nothing at all otherwise.
@@ -835,26 +916,45 @@ static const uint32_t NODEINFO_EVERY_MS = 3u * 3600u * 1000u;
 // A name changed on LORA SETTINGS: the next Meshtastic text says so first.
 void identityChanged() { s_nodeInfoSent = false; }
 
+// Our User message: id "!xxxxxxxx", long name, short name, hardware
+// PRIVATE_HW, and -- once Lora::Dm has a key pair -- our public key, which is
+// what lets a Meshtastic node send us a direct message at all. With ANNOUNCE
+// NAME off the names are the node number and its last four digits: a node
+// that needs our key for a DM still gets it, without the name.
+static size_t ourUser(const char* name, uint8_t* user /* room for 120 */) {
+    const uint32_t from = myMeshtasticNum();
+    char idStr[12], shortName[5];
+    snprintf(idStr, sizeof idStr, "!%08lx", (unsigned long)from);
+    if (!Settings::loraAnnounce() || !name || !name[0]) {
+        name = idStr;
+        snprintf(shortName, sizeof shortName, "%04lx", (unsigned long)(from & 0xFFFF));
+    } else {
+        // The short name: the one typed on LORA SETTINGS, else SQWT while he
+        // still goes by the default SQUACHY (the owner's pick, 2026-10-21 --
+        // "SQUA" read as nothing), else the first four characters of the name.
+        // One rule, host-tested: MyName::shortName (include/lora_myname.h).
+        MyName::shortName(Settings::loraShortName(), name, shortName, sizeof shortName);
+    }
+    size_t ln = strlen(name); if (ln > 39) ln = 39;
+    const size_t sn = strlen(shortName);
+    size_t u = 0;
+    user[u++] = 0x0A; user[u++] = (uint8_t)strlen(idStr); memcpy(user + u, idStr, strlen(idStr)); u += strlen(idStr);
+    user[u++] = 0x12; user[u++] = (uint8_t)ln;          memcpy(user + u, name, ln);              u += ln;
+    user[u++] = 0x1A; user[u++] = (uint8_t)sn;          memcpy(user + u, shortName, sn);         u += sn;
+    user[u++] = 0x28; user[u++] = 0xFF; user[u++] = 0x01;   // hw_model 255, PRIVATE_HW
+    if (Dm::ready()) { user[u++] = 0x42; user[u++] = 32; memcpy(user + u, Dm::publicKey(), 32); u += 32; }   // public_key
+    return u;
+}
+
 static void announceIfDue(const Profile& prof, const char* name, int8_t dbm) {
     const uint32_t now = millis();
     // ANNOUNCE NAME off: the mesh sees the node number, as before 2026-10-21.
     if (!Settings::loraAnnounce()) return;
     if (s_nodeInfoSent && now - s_nodeInfoAt < NODEINFO_EVERY_MS) return;
-    const uint32_t from = 0x5A5A0000u | (uint32_t)(ESP.getEfuseMac() & 0xFFFF);
-    char idStr[12], shortName[5];
-    snprintf(idStr, sizeof idStr, "!%08lx", (unsigned long)from);
-    size_t ln = strlen(name); if (ln > 39) ln = 39;
-    // The short name: the one typed on LORA SETTINGS, else SQWT while he
-    // still goes by the default SQUACHY (the owner's pick, 2026-10-21 --
-    // "SQUA" read as nothing), else the first four characters of the name.
-    // One rule, host-tested: MyName::shortName (include/lora_myname.h).
+    char shortName[5];
     MyName::shortName(Settings::loraShortName(), name, shortName, sizeof shortName);
-    const size_t sn = strlen(shortName);
-    uint8_t user[80]; size_t u = 0;
-    user[u++] = 0x0A; user[u++] = (uint8_t)strlen(idStr); memcpy(user + u, idStr, strlen(idStr)); u += strlen(idStr);
-    user[u++] = 0x12; user[u++] = (uint8_t)ln;          memcpy(user + u, name, ln);              u += ln;
-    user[u++] = 0x1A; user[u++] = (uint8_t)sn;          memcpy(user + u, shortName, sn);         u += sn;
-    user[u++] = 0x28; user[u++] = 0xFF; user[u++] = 0x01;   // hw_model 255, PRIVATE_HW
+    uint8_t user[120];
+    const size_t u = ourUser(name, user);
     uint8_t f[256]; uint32_t id = 0;
     // On the preset's own channel, whatever the chip says: see sendText.
     const uint16_t n = meshtasticFrame((uint8_t)Meshtastic::PORT_NODEINFO, user, u, f, id, presetChannelKey(prof));
@@ -921,6 +1021,99 @@ bool sendText(Proto p, const char* name, const char* text, int8_t dbm, int16_t c
                    "YOU", 0, text, pk, millis(), true, 0, key);
     }
     return ok;
+}
+
+// The jobs Lora::Dm hands out -- a DM sealed and ready, an ACK or NAK owed,
+// our NodeInfo to one node -- each built here (the channel and our name live
+// here) and sent with the sniffer parked, two per pass at most so a burst of
+// answers never stalls the screen for long. With LORA TX off nothing goes
+// out: owed answers are dropped (the other side retries, then gives up), and
+// a DM in flight spends its tries and fails.
+static void dmTick(uint32_t now) {
+    if (!Dm::ready()) return;
+    uint8_t idx = 0;
+    if (!meshProfile(Proto::MESHTASTIC, idx)) return;
+    const Profile& prof = profile(idx);
+    int8_t dbm = (int8_t)Settings::loraTxDbm();
+    if (prof.group == PG_MESH_EU && dbm > 14) dbm = 14;
+    const uint32_t me = myMeshtasticNum();
+    for (int k = 0; k < 2; k++) {
+        Dm::Out o;
+        if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(20)) != pdTRUE) return;
+        const bool got = Dm::next(now, Settings::loraHops(), o);
+        xSemaphoreGive(s_lock);
+        if (!got) return;
+        bool ok = false;
+        if (dbm) {
+            const char* name = MyName::longName(Settings::loraName(), Squachy::nickname());
+            uint8_t f[256], data[220];
+            uint16_t n = 0;
+            const Meshtastic::Channel ch = presetChannelKey(prof);
+            switch (o.job) {
+                case Dm::J_DM:
+                    // Our name and key to everyone first, on the usual rhythm.
+                    announceIfDue(prof, name, dbm);
+                    memcpy(f, o.frame, o.len); n = o.len;
+                    break;
+                case Dm::J_ACK: case Dm::J_NAK: {
+                    const uint8_t routing[2] = { 0x18, (uint8_t)(o.job == Dm::J_ACK ? 0 : o.err) };
+                    const size_t dn = Meshtastic::encodeData((uint8_t)Meshtastic::PORT_ROUTING, routing, 2, false, o.id, data);
+                    n = Meshtastic::buildChannelFrame(ch, me, o.to, esp_random() | 1u, o.hops, false, data, dn, f);
+                    break;
+                }
+                case Dm::J_NODEINFO: {
+                    uint8_t user[120];
+                    const size_t u = ourUser(name, user);
+                    const size_t dn = Meshtastic::encodeData((uint8_t)Meshtastic::PORT_NODEINFO, user, u, o.wantResponse, 0, data);
+                    n = Meshtastic::buildChannelFrame(ch, me, o.to, esp_random() | 1u, o.hops, false, data, dn, f);
+                    break;
+                }
+                default: break;
+            }
+            ok = n && transmitOn(prof, f, n, dbm);
+            static const char* const JOB[] = { "-", "DM", "ACK", "NAK", "NodeInfo" };
+            Serial.printf("[lora] DM job %s to !%08lx (id %08lx, %u hops%s): %s\n", (unsigned)o.job < 5 ? JOB[o.job] : "?",
+                          (unsigned long)o.to, (unsigned long)o.id, (unsigned)o.hops, o.wantResponse ? ", asking for theirs" : "",
+                          ok ? "sent" : "FAILED");
+        }
+        if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(50)) == pdTRUE) {
+            // TX off: say it went, so a DM spends its tries and fails rather
+            // than waiting for ever.
+            Dm::sent(o, ok || !dbm, millis());
+            xSemaphoreGive(s_lock);
+        }
+    }
+}
+
+uint32_t sendDm(uint32_t to, const char* text) {
+    if (!s_present || !Dm::ready() || !text || !*text || !Settings::loraTxDbm()) return 0;
+    const uint32_t now = millis();
+    uint32_t id = esp_random() | 1u;
+    if (!s_lock || xSemaphoreTake(s_lock, pdMS_TO_TICKS(200)) != pdTRUE) return 0;
+    id = Dm::send(to, text, id, now);
+    if (id) {
+        Packet pk; memset(&pk, 0, sizeof pk);
+        pk.proto = Proto::MESHTASTIC; pk.ms = now;
+        Msgs::noteDm(to, true, id, (uint8_t)Dm::state(id), "YOU", text, pk, now, true, 0,
+                     Msgs::meshtasticKey(myMeshtasticNum(), id));
+    }
+    xSemaphoreGive(s_lock);
+    Serial.printf("[lora] DM to !%08lx queued: %s\n", (unsigned long)to, id ? "ok" : "REFUSED (outbox full?)");
+    return id;
+}
+
+uint8_t dmState(uint32_t id) {
+    if (!s_lock || xSemaphoreTake(s_lock, pdMS_TO_TICKS(20)) != pdTRUE) return 0;
+    const uint8_t s = (uint8_t)Dm::state(id);
+    xSemaphoreGive(s_lock);
+    return s;
+}
+
+bool dmHasKey(uint32_t num) {
+    if (!s_lock || xSemaphoreTake(s_lock, pdMS_TO_TICKS(20)) != pdTRUE) return false;
+    const bool k = Dm::hasKey(num);
+    xSemaphoreGive(s_lock);
+    return k;
 }
 
 void applyListen(uint8_t listen) {
@@ -1939,6 +2132,39 @@ bool console(const char* line) {
     // all, and the keys will be waiting when one arrives. So CHAN comes before
     // the no-module gate.
     if (strncasecmp(a, "CHAN", 4) == 0) return channelConsole(a + 4);
+    // LORA DM !27cc63cc text | LORA DMKEYS | LORA DMFORGET !27cc63cc
+    if (strncasecmp(a, "DMKEYS", 6) == 0) {
+        const uint8_t* pub = Dm::publicKey();
+        char hex[65]; LoraCrypto::toHex(pub, 32, hex);
+        Serial.printf("[lora] us: !%08lx key %s\n", (unsigned long)myMeshtasticNum(), Dm::ready() ? hex : "(none yet)");
+        uint8_t buf[1 + Dm::PEERS * 36];
+        size_t n = 0;
+        if (s_lock && xSemaphoreTake(s_lock, pdMS_TO_TICKS(200)) == pdTRUE) { n = Dm::saveKeys(buf, sizeof buf); xSemaphoreGive(s_lock); }
+        for (size_t o = 1; o + 36 <= n; o += 36) {
+            LoraCrypto::toHex(buf + o + 4, 32, hex);
+            Serial.printf("[lora]   !%08lx %s\n", (unsigned long)LoraCrypto::rd32le(buf + o), hex);
+        }
+        Serial.printf("[lora] %u keys; %u DMs in flight\n", (unsigned)((n ? n - 1 : 0) / 36), (unsigned)Dm::pending());
+        return true;
+    }
+    if (strncasecmp(a, "DMFORGET", 8) == 0) {
+        const char* q = a + 8; while (*q == ' ') q++; if (*q == '!') q++;
+        const uint32_t num = (uint32_t)strtoul(q, nullptr, 16);
+        bool ok = false;
+        if (s_lock && xSemaphoreTake(s_lock, pdMS_TO_TICKS(200)) == pdTRUE) { ok = Dm::forgetKey(num); xSemaphoreGive(s_lock); }
+        Serial.printf("[lora] key for !%08lx %s\n", (unsigned long)num, ok ? "forgotten" : "not held");
+        return true;
+    }
+    if (strncasecmp(a, "DM", 2) == 0 && (a[2] == ' ' || a[2] == '\t')) {
+        const char* q = a + 2; while (*q == ' ') q++; if (*q == '!') q++;
+        char* end = nullptr;
+        const uint32_t num = (uint32_t)strtoul(q, &end, 16);
+        while (end && *end == ' ') end++;
+        if (!num || !end || !*end) { Serial.println("[lora] LORA DM !<node> <text>  -- e.g. LORA DM !27cc63cc hello"); return true; }
+        if (!Settings::loraTxDbm()) { Serial.println("[lora] LORA TX is off (LORA SETTINGS > TX POWER)"); return true; }
+        sendDm(num, end);
+        return true;
+    }
     if (strcasecmp(a, "LOOKUPS") == 0) { lookupsConsole(); return true; }
     if (strncasecmp(a, "LISTEN", 6) == 0) {
         // LORA LISTEN 0|1|2|3: the Settings row from the bench -- off,

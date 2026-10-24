@@ -108,6 +108,64 @@ void note(Proto p, uint8_t chan, uint8_t port, const char* sender, uint64_t send
     s_st->total++;
 }
 
+void noteDm(uint32_t peer, bool mine, uint32_t pktId, uint8_t dmState, const char* sender, const char* text,
+            const Packet& pk, uint32_t now, bool direct, uint8_t hops, uint32_t key) {
+    if (!s_st || !peer) return;
+    const uint32_t before = s_st->total;
+    note(Proto::MESHTASTIC, DM_CHAN, 1 /* Meshtastic::PORT_TEXT */, sender, mine ? 0 : peer, text, pk, now,
+         direct, hops, key);
+    if (s_st->total == before) return;      // a copy, dropped
+    Msg& m = s_st->m[(s_st->head + CAP - 1) % CAP];
+    m.peer = peer;
+    m.mine = mine;
+    m.pktId = pktId;
+    m.dmState = dmState;
+}
+
+bool setDmState(uint32_t pktId, uint8_t dmState) {
+    if (!s_st || !pktId) return false;
+    for (uint16_t i = 0; i < s_st->held; i++) {
+        Msg& m = s_st->m[newest(i)];
+        if (m.chan == DM_CHAN && m.mine && m.pktId == pktId) { m.dmState = dmState; return true; }
+    }
+    return false;
+}
+
+uint16_t countForPeer(uint32_t peer) {
+    if (!s_st || !peer) return 0;
+    uint16_t n = 0;
+    for (uint16_t i = 0; i < s_st->held; i++) {
+        const Msg& m = s_st->m[newest(i)];
+        if (m.chan == DM_CHAN && m.peer == peer) n++;
+    }
+    return n;
+}
+
+uint16_t pageForPeer(uint32_t peer, Msg* out, uint16_t cap, uint16_t from) {
+    if (!s_st || !out || !cap || !peer) return 0;
+    uint16_t seen = 0, w = 0;
+    for (uint16_t i = 0; i < s_st->held && w < cap; i++) {
+        const Msg& m = s_st->m[newest(i)];
+        if (m.chan != DM_CHAN || m.peer != peer) continue;
+        if (seen++ < from) continue;
+        out[w++] = m;
+    }
+    return w;
+}
+
+uint16_t dmPeers(uint32_t* out, uint16_t cap) {
+    if (!s_st || !out || !cap) return 0;
+    uint16_t w = 0;
+    for (uint16_t i = 0; i < s_st->held && w < cap; i++) {
+        const Msg& m = s_st->m[newest(i)];
+        if (m.chan != DM_CHAN || !m.peer) continue;
+        bool have = false;
+        for (uint16_t j = 0; j < w && !have; j++) have = out[j] == m.peer;
+        if (!have) out[w++] = m.peer;
+    }
+    return w;
+}
+
 uint16_t renameSender(Proto p, uint64_t senderId, const char* sender) {
     if (!s_st || !sender || !sender[0]) return 0;
     uint16_t n = 0;

@@ -89,6 +89,14 @@ bool sendText(Proto p, const char* name, const char* text, int8_t dbm, int16_t c
 void identityChanged();
 void clearChats();
 void forgetNames();
+// A Meshtastic direct message to node `to` (include/lora_dm.h): queued, its
+// row in the chat at once, sealed and sent from tick(), ACKed or retried
+// there. Returns its packet id, 0 when refused (no radio, LORA TX off, empty
+// text, outbox full). dmState is a Lora::Dm::State; dmHasKey whether we hold
+// that node's key (without it the DM waits while we ask for one).
+uint32_t sendDm(uint32_t to, const char* text);
+uint8_t  dmState(uint32_t id);
+bool     dmHasKey(uint32_t num);
 // CHANNELS on the same page: add one through the console's own path (LORA
 // CHAN: checked, added, stored), drop a user's row by its channelRow number
 // (a built-in refuses), and a saved key as its first and last four characters
@@ -257,6 +265,9 @@ inline bool sendText(Proto, const char*, const char*, int8_t, int16_t = -1) { re
 inline void identityChanged() {}
 inline void clearChats() {}
 inline void forgetNames() {}
+inline uint32_t sendDm(uint32_t, const char*) { return 0; }
+inline uint8_t  dmState(uint32_t) { return 0; }
+inline bool     dmHasKey(uint32_t) { return false; }
 inline bool channelAdd(Proto, const char*, const char*, char* msg, size_t cap) { if (msg && cap) msg[0] = '\0'; return false; }
 inline bool channelDropRow(uint8_t) { return false; }
 inline void channelKeyPreview(uint8_t, char* out, size_t cap) { if (cap) out[0] = '\0'; }

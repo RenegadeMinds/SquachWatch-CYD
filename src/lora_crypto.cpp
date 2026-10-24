@@ -63,18 +63,44 @@ static inline void addRoundKey(uint8_t s[16], const uint32_t* k) {
     }
 }
 
-void Aes128::encryptBlock(const uint8_t in[16], uint8_t out[16]) const {
+// The cipher rounds, shared by both key sizes: AES-128 runs 10, AES-256 14.
+static void encryptRounds(const uint32_t* rk, int rounds, const uint8_t in[16], uint8_t out[16]);
+
+void Aes128::encryptBlock(const uint8_t in[16], uint8_t out[16]) const { encryptRounds(rk, 10, in, out); }
+
+void Aes256::setKey(const uint8_t key[32]) {
+    for (int i = 0; i < 8; i++)
+        rk[i] = ((uint32_t)key[4*i] << 24) | ((uint32_t)key[4*i+1] << 16) | ((uint32_t)key[4*i+2] << 8) | key[4*i+3];
+    uint32_t rcon = 0x01000000u;
+    for (int i = 8; i < 60; i++) {
+        uint32_t t = rk[i-1];
+        if ((i & 7) == 0) {
+            t = ((uint32_t)SBOX[(t >> 16) & 0xff] << 24) | ((uint32_t)SBOX[(t >> 8) & 0xff] << 16) |
+                ((uint32_t)SBOX[t & 0xff] << 8) | SBOX[(t >> 24) & 0xff];
+            t ^= rcon;
+            rcon = (uint32_t)xtime((uint8_t)(rcon >> 24)) << 24;
+        } else if ((i & 7) == 4) {
+            t = ((uint32_t)SBOX[(t >> 24) & 0xff] << 24) | ((uint32_t)SBOX[(t >> 16) & 0xff] << 16) |
+                ((uint32_t)SBOX[(t >> 8) & 0xff] << 8) | SBOX[t & 0xff];
+        }
+        rk[i] = rk[i-8] ^ t;
+    }
+}
+
+void Aes256::encryptBlock(const uint8_t in[16], uint8_t out[16]) const { encryptRounds(rk, 14, in, out); }
+
+static void encryptRounds(const uint32_t* rk, int rounds, const uint8_t in[16], uint8_t out[16]) {
     uint8_t s[16];
     memcpy(s, in, 16);
     addRoundKey(s, rk);
-    for (int round = 1; round <= 10; round++) {
+    for (int round = 1; round <= rounds; round++) {
         for (int i = 0; i < 16; i++) s[i] = SBOX[s[i]];
         // ShiftRows: state is column-major, s[4*c + r]
         uint8_t t;
         t = s[1]; s[1] = s[5]; s[5] = s[9]; s[9] = s[13]; s[13] = t;
         t = s[2]; s[2] = s[10]; s[10] = t; t = s[6]; s[6] = s[14]; s[14] = t;
         t = s[15]; s[15] = s[11]; s[11] = s[7]; s[7] = s[3]; s[3] = t;
-        if (round != 10) {
+        if (round != rounds) {
             for (int c = 0; c < 4; c++) {
                 uint8_t* p = s + 4*c;
                 const uint8_t a0 = p[0], a1 = p[1], a2 = p[2], a3 = p[3];
@@ -127,6 +153,150 @@ void ctr(const Aes128& k, const uint8_t nonce[16], uint8_t* buf, size_t len) {
         // what mbedtls and rweather's CTR both do, and what Meshtastic runs.
         for (int i = 15; i >= 0 && ++ctr[i] == 0; i--) {}
     }
+}
+
+// ---- AES-CCM, L = 2, M = 8, no associated data ------------------------------
+// RFC 3610's construction with the fields Meshtastic fixes. B0 is the flags
+// byte (no AAD; (M-2)/2 = 3 in bits 3-5; L-1 = 1), the nonce, the length
+// big-endian; the MAC is CBC over B0 then the zero-padded message. The
+// counter blocks are flags L-1, the nonce, the block number big-endian, and
+// block 0's keystream masks the tag.
+static void ccmMac(const Aes256& k, const uint8_t nonce[13], const uint8_t* msg, size_t len, uint8_t x[16]) {
+    uint8_t b[16];
+    b[0] = (uint8_t)((((8 - 2) / 2) << 3) | (2 - 1));
+    memcpy(b + 1, nonce, 13);
+    b[14] = (uint8_t)(len >> 8); b[15] = (uint8_t)len;
+    k.encryptBlock(b, x);
+    for (size_t off = 0; off < len; off += 16) {
+        const size_t n = (len - off < 16) ? (len - off) : 16;
+        for (size_t i = 0; i < n; i++) x[i] ^= msg[off + i];
+        k.encryptBlock(x, x);
+    }
+}
+static void ccmCtr(const Aes256& k, const uint8_t nonce[13], const uint8_t* in, size_t len, uint8_t* out,
+                   uint8_t s0[16]) {
+    uint8_t a[16], ks[16];
+    a[0] = (uint8_t)(2 - 1);
+    memcpy(a + 1, nonce, 13);
+    a[14] = a[15] = 0;
+    k.encryptBlock(a, s0);
+    uint16_t ctrN = 1;
+    for (size_t off = 0; off < len; off += 16, ctrN++) {
+        a[14] = (uint8_t)(ctrN >> 8); a[15] = (uint8_t)ctrN;
+        k.encryptBlock(a, ks);
+        const size_t n = (len - off < 16) ? (len - off) : 16;
+        for (size_t i = 0; i < n; i++) out[off + i] = in[off + i] ^ ks[i];
+    }
+}
+void ccmSeal(const Aes256& k, const uint8_t nonce[13], const uint8_t* in, size_t len,
+             uint8_t* out, uint8_t tag[8]) {
+    uint8_t x[16], s0[16];
+    ccmMac(k, nonce, in, len, x);      // over the plaintext, before `out` (maybe `in`) is overwritten
+    ccmCtr(k, nonce, in, len, out, s0);
+    for (int i = 0; i < 8; i++) tag[i] = x[i] ^ s0[i];
+}
+bool ccmOpen(const Aes256& k, const uint8_t nonce[13], const uint8_t* in, size_t len,
+             const uint8_t tag[8], uint8_t* out) {
+    uint8_t x[16], s0[16];
+    ccmCtr(k, nonce, in, len, out, s0);
+    ccmMac(k, nonce, out, len, x);
+    uint8_t diff = 0;
+    for (int i = 0; i < 8; i++) diff |= (uint8_t)(x[i] ^ s0[i] ^ tag[i]);
+    if (diff) { memset(out, 0, len); return false; }
+    return true;
+}
+
+// ---- X25519 -------------------------------------------------------------------
+// TweetNaCl's field arithmetic (public domain): sixteen 16-bit limbs held in
+// int64, a Montgomery ladder in constant time. Slow next to a tuned version
+// -- tens of milliseconds on the S3 -- and run once per contact, because the
+// key it gives is kept (Lora::Dm).
+typedef int64_t Gf[16];
+static void car25519(Gf o) {
+    for (int i = 0; i < 16; i++) {
+        o[i] += (int64_t)1 << 16;
+        const int64_t c = o[i] >> 16;
+        o[(i + 1) * (i < 15)] += c - 1 + 37 * (c - 1) * (i == 15);
+        o[i] -= c * 65536;
+    }
+}
+static void sel25519(Gf p, Gf q, int b) {
+    const int64_t c = ~((int64_t)b - 1);
+    for (int i = 0; i < 16; i++) { const int64_t t = c & (p[i] ^ q[i]); p[i] ^= t; q[i] ^= t; }
+}
+static void pack25519(uint8_t o[32], const Gf n) {
+    Gf m, t;
+    for (int i = 0; i < 16; i++) t[i] = n[i];
+    car25519(t); car25519(t); car25519(t);
+    for (int j = 0; j < 2; j++) {
+        m[0] = t[0] - 0xffed;
+        for (int i = 1; i < 15; i++) {
+            m[i] = t[i] - 0xffff - ((m[i-1] >> 16) & 1);
+            m[i-1] &= 0xffff;
+        }
+        m[15] = t[15] - 0x7fff - ((m[14] >> 16) & 1);
+        const int b = (int)((m[15] >> 16) & 1);
+        m[14] &= 0xffff;
+        sel25519(t, m, 1 - b);
+    }
+    for (int i = 0; i < 16; i++) { o[2*i] = (uint8_t)(t[i] & 0xff); o[2*i+1] = (uint8_t)(t[i] >> 8); }
+}
+static void unpack25519(Gf o, const uint8_t n[32]) {
+    for (int i = 0; i < 16; i++) o[i] = n[2*i] + ((int64_t)n[2*i+1] << 8);
+    o[15] &= 0x7fff;
+}
+static void fAdd(Gf o, const Gf a, const Gf b) { for (int i = 0; i < 16; i++) o[i] = a[i] + b[i]; }
+static void fSub(Gf o, const Gf a, const Gf b) { for (int i = 0; i < 16; i++) o[i] = a[i] - b[i]; }
+static void fMul(Gf o, const Gf a, const Gf b) {
+    int64_t t[31];
+    for (int i = 0; i < 31; i++) t[i] = 0;
+    for (int i = 0; i < 16; i++) for (int j = 0; j < 16; j++) t[i+j] += a[i] * b[j];
+    for (int i = 0; i < 15; i++) t[i] += 38 * t[i+16];
+    for (int i = 0; i < 16; i++) o[i] = t[i];
+    car25519(o); car25519(o);
+}
+static void fSq(Gf o, const Gf a) { fMul(o, a, a); }
+static void inv25519(Gf o, const Gf in) {
+    Gf c;
+    for (int a = 0; a < 16; a++) c[a] = in[a];
+    for (int a = 253; a >= 0; a--) {
+        fSq(c, c);
+        if (a != 2 && a != 4) fMul(c, c, in);
+    }
+    for (int a = 0; a < 16; a++) o[a] = c[a];
+}
+
+bool x25519(uint8_t out[32], const uint8_t scalar[32], const uint8_t point[32]) {
+    static const Gf K121665 = {0xDB41, 1};
+    uint8_t z[32];
+    Gf x, a, b, c, d, e, f;
+    for (int i = 0; i < 31; i++) z[i] = scalar[i];
+    z[31] = (uint8_t)((scalar[31] & 127) | 64);
+    z[0] &= 248;
+    unpack25519(x, point);
+    for (int i = 0; i < 16; i++) { b[i] = x[i]; d[i] = a[i] = c[i] = 0; }
+    a[0] = d[0] = 1;
+    for (int i = 254; i >= 0; --i) {
+        const int r = (z[i >> 3] >> (i & 7)) & 1;
+        sel25519(a, b, r); sel25519(c, d, r);
+        fAdd(e, a, c); fSub(a, a, c); fAdd(c, b, d); fSub(b, b, d);
+        fSq(d, e); fSq(f, a); fMul(a, c, a); fMul(c, b, e);
+        fAdd(e, a, c); fSub(a, a, c); fSq(b, a); fSub(c, d, f);
+        fMul(a, c, K121665); fAdd(a, a, d); fMul(c, c, a); fMul(a, d, f);
+        fMul(d, b, x); fSq(b, e);
+        sel25519(a, b, r); sel25519(c, d, r);
+    }
+    inv25519(c, c);
+    fMul(a, a, c);
+    pack25519(out, a);
+    uint8_t any = 0;
+    for (int i = 0; i < 32; i++) any |= out[i];
+    return any != 0;
+}
+
+void x25519Base(uint8_t pub[32], const uint8_t priv[32]) {
+    static const uint8_t NINE[32] = {9};
+    x25519(pub, priv, NINE);
 }
 
 static void shiftLeft1(const uint8_t in[16], uint8_t out[16]) {

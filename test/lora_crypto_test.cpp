@@ -28,6 +28,56 @@ int main() {
         ck("decrypt round trip", memcmp(back, pt, 16) == 0);
     }
 
+    suite("AES-256 (FIPS-197 C.3)");
+    {
+        uint8_t key[32], pt[16], ct[16];
+        fromHex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f", key, 32);
+        fromHex("00112233445566778899aabbccddeeff", pt, 16);
+        Aes256 a; a.setKey(key);
+        a.encryptBlock(pt, ct);
+        ck("encrypt", hexIs(ct, 16, "8ea2b7ca516745bfeafc49904b496089"));
+    }
+
+    suite("AES-256-CCM, 13-byte nonce, 8-byte tag (vector from Python's cryptography)");
+    {
+        uint8_t key[32], nonce[13], pt[40], ct[40], tag[8], back[40];
+        fromHex("202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f", key, 32);
+        fromHex("a0a1a2a3a4a5a6a7a8a9aaabac", nonce, 13);
+        for (int i = 0; i < 40; i++) pt[i] = (uint8_t)i;
+        Aes256 a; a.setKey(key);
+        ccmSeal(a, nonce, pt, 40, ct, tag);
+        ck("ciphertext", hexIs(ct, 40, "c2c7fca38eeb5eea02618589b190c76857839dd71f9f8c3be9a4671a2da393fdfb080d0a79f37c15"));
+        ck("tag", hexIs(tag, 8, "531671729d9efa68"));
+        ck("opens", ccmOpen(a, nonce, ct, 40, tag, back) && memcmp(back, pt, 40) == 0);
+        ct[7] ^= 0x01;
+        ck("a flipped bit is refused", !ccmOpen(a, nonce, ct, 40, tag, back));
+        ct[7] ^= 0x01; tag[0] ^= 0x80;
+        ck("a flipped tag bit is refused", !ccmOpen(a, nonce, ct, 40, tag, back));
+        uint8_t inPlace[40]; memcpy(inPlace, pt, 40);
+        ccmSeal(a, nonce, inPlace, 40, inPlace, tag);
+        ck("sealing in place gives the same bytes", hexIs(inPlace, 40, "c2c7fca38eeb5eea02618589b190c76857839dd71f9f8c3be9a4671a2da393fdfb080d0a79f37c15"));
+    }
+
+    suite("X25519 (RFC 7748)");
+    {
+        uint8_t k[32], u[32], out[32];
+        fromHex("a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4", k, 32);
+        fromHex("e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c", u, 32);
+        ck("section 5.2, first vector", x25519(out, k, u) &&
+           hexIs(out, 32, "c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552"));
+        uint8_t ap[32], bp[32], apub[32], bpub[32], s1[32], s2[32];
+        fromHex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a", ap, 32);
+        fromHex("5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb", bp, 32);
+        x25519Base(apub, ap); x25519Base(bpub, bp);
+        ck("section 6.1, Alice's public key", hexIs(apub, 32, "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a"));
+        ck("section 6.1, Bob's public key",   hexIs(bpub, 32, "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f"));
+        ck("section 6.1, the shared secret both ways",
+           x25519(s1, ap, bpub) && x25519(s2, bp, apub) && memcmp(s1, s2, 32) == 0 &&
+           hexIs(s1, 32, "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742"));
+        uint8_t zero[32] = {0};
+        ck("a low-order point is refused (all-zero result)", !x25519(out, ap, zero));
+    }
+
     suite("AES-CMAC (RFC 4493)");
     {
         uint8_t key[16], msg[64], mac[16];
