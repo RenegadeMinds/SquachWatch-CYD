@@ -43,6 +43,7 @@ struct Row {
     uint32_t ms;
     int16_t  rssi;
     uint32_t peer;       // DMs: the other node; a channel row: its sender's number (0 = ours)
+    Lora::Proto proto;   // DMs: which network the conversation is on
     bool     mine;
     uint8_t  dmState;
     uint8_t  unread;     // the DMs list: that conversation's unread count
@@ -53,6 +54,7 @@ Row            s_rows[KEEP];
 uint8_t        s_rowN   = 0;
 uint8_t        s_tab    = 0;     // 0 Meshtastic, 1 MeshCore, 2 DMs
 uint32_t       s_peer   = 0;     // the DMs tab: the open conversation, 0 = the list
+Lora::Proto    s_peerProto = Lora::Proto::MESHTASTIC;
 int            s_scroll = 0;     // rows skipped from the newest
 uint32_t       s_sig    = 0xFFFFFFFFu;
 uint8_t        s_sigTab = 0xFF;
@@ -112,7 +114,11 @@ void chanName(Lora::Proto p, uint8_t idx, char* out, size_t cap) {
     else                              { MeshCore::Channel c = MeshCore::channel(idx);     snprintf(out, cap, "%s", c.name[0] ? c.name : "?"); }
 }
 
-bool isDm(const Lora::Msgs::Msg& m) { return m.proto == Lora::Proto::MESHTASTIC && m.chan == Lora::Msgs::DM_CHAN; }
+// A DM on either network: Meshtastic's PKI ones and MeshCore's.
+bool isDm(const Lora::Msgs::Msg& m) { return m.chan == Lora::Msgs::DM_CHAN; }
+// A conversation's name in its network's colour, so two networks in one
+// list stay told apart.
+uint16_t netCol(Lora::Proto p) { return p == Lora::Proto::MESHCORE ? Theme::PINK : Theme::CYAN; }
 
 // Walk the ring newest first, count every tab, and copy the open tab's
 // newest KEEP. Only when something changed -- or, in a conversation, every
@@ -129,26 +135,28 @@ void refresh(uint32_t now) {
         if (!Lora::msgAt(i, m)) break;
         if (isDm(m)) {
             s_count[2]++;
-            const bool unread = !m.mine && m.ms > seenMs(m.peer) && !(s_tab == 2 && s_peer == m.peer);
+            const bool unread = !m.mine && m.ms > seenMs(m.peer) && !(s_tab == 2 && s_peer == m.peer && s_peerProto == m.proto);
             if (unread) s_dmUnread++;
             if (s_tab != 2) continue;
             if (s_peer) {
-                if (m.peer != s_peer || s_rowN >= KEEP) continue;
+                if (m.peer != s_peer || m.proto != s_peerProto || s_rowN >= KEEP) continue;
                 Row& r = s_rows[s_rowN++];
                 snprintf(r.sender, sizeof r.sender, "%s", m.mine ? "YOU" : (m.sender[0] ? m.sender : "?"));
                 r.chan[0] = '\0';
                 snprintf(r.text, sizeof r.text, "%s", m.text);
                 r.ms = m.ms; r.rssi = m.rssi; r.peer = m.peer; r.mine = m.mine; r.dmState = m.dmState; r.unread = 0;
+                r.proto = m.proto;
             } else {
                 // The list: one row a conversation, its newest line.
                 Row* r = nullptr;
-                for (uint8_t k = 0; k < s_rowN; k++) if (s_rows[k].peer == m.peer) { r = &s_rows[k]; break; }
+                for (uint8_t k = 0; k < s_rowN; k++) if (s_rows[k].peer == m.peer && s_rows[k].proto == m.proto) { r = &s_rows[k]; break; }
                 if (!r) {
                     if (s_rowN >= KEEP) continue;
                     r = &s_rows[s_rowN++];
                     memset(r, 0, sizeof *r);
                     r->peer = m.peer;
-                    if (m.mine) Lora::nodeName(m.peer, r->sender, sizeof r->sender);
+                    r->proto = m.proto;
+                    if (m.mine) Lora::nodeName(m.proto, m.peer, r->sender, sizeof r->sender);
                     else        snprintf(r->sender, sizeof r->sender, "%s", m.sender[0] ? m.sender : "?");
                     snprintf(r->text, sizeof r->text, "%s%s", m.mine ? "you: " : "", m.text);
                     r->ms = m.ms; r->mine = m.mine; r->dmState = m.dmState;
@@ -171,6 +179,7 @@ void refresh(uint32_t now) {
         r.ms = m.ms;
         r.rssi = m.rssi;
         r.peer = m.proto == Lora::Proto::MESHTASTIC && strcmp(m.sender, "YOU") ? (uint32_t)m.senderId : 0;
+        r.proto = m.proto;
         r.mine = false; r.dmState = 0; r.unread = 0;
     }
 }
@@ -325,9 +334,10 @@ void uiLoraChatSelect(uint8_t tab) {
     if (tab != 2) s_peer = 0;
 }
 
-void uiLoraChatOpenDm(uint32_t peer) {
+void uiLoraChatOpenDm(uint32_t peer, Lora::Proto p) {
     s_tab = 2;
     s_peer = peer;
+    s_peerProto = p;
     s_scroll = 0;
     s_sig = 0xFFFFFFFFu;
     markSeen(peer, millis());
@@ -398,17 +408,20 @@ void uiLoraChatTick(TFT_eSPI& t, uint32_t now) {
     if (s_tab == 2 && s_peer) {
         // The conversation's header: the way back to the list, and whose it is.
         char nm[24], who[48];
-        Lora::nodeName(s_peer, nm, sizeof nm);
+        Lora::nodeName(s_peerProto, s_peer, nm, sizeof nm);
         char pv[40];
-        snprintf(who, sizeof who, "%s%s", Privacy::name(nm, pv, sizeof pv), Lora::dmHasKey(s_peer) ? "" : "  (NO KEY YET)");
+        const bool mc = s_peerProto == Lora::Proto::MESHCORE;
+        snprintf(who, sizeof who, "%s%s", Privacy::name(nm, pv, sizeof pv),
+                 Lora::dmHasKey(s_peerProto, s_peer) ? (mc ? "  MESHCORE" : "  MESHTASTIC") : mc ? "  (NOT A CONTACT)" : "  (NO KEY YET)");
         s_headY = y;
         t.setTextColor(dmCol(), Theme::BG);
         t.setCursor(6, y); t.print("< ALL DMs");
+        t.setTextColor(netCol(s_peerProto), Theme::BG);
         t.setCursor(w - 8 - t.textWidth(who), y); t.print(who);
     } else {
         t.setTextColor(Theme::blend(Theme::BG, Theme::WHITE, 140), Theme::BG);
         t.setCursor(6, y);
-        t.print(s_tab == 2 ? "PRIVATE MESSAGES (MESHTASTIC)" : listenLine());
+        t.print(s_tab == 2 ? "PRIVATE MESSAGES: MESHTASTIC + MESHCORE" : listenLine());
     }
     y += t.fontHeight() + 5;
 
@@ -438,7 +451,7 @@ void uiLoraChatTick(TFT_eSPI& t, uint32_t now) {
             // The list: who, how long ago, their newest line, an unread count.
             if (r.unread) t.fillRect(4, y - 2, w - 8, t.fontHeight() + lineH + 6, Theme::blend(Theme::BG, accent, 28));
             const uint16_t rb = r.unread ? Theme::blend(Theme::BG, accent, 28) : Theme::BG;
-            t.setTextColor(accent, rb);
+            t.setTextColor(netCol(r.proto), rb);
             t.setCursor(6, y); t.print(Privacy::name(r.sender, pv, sizeof pv));
             if (r.unread) { char u[8]; snprintf(u, sizeof u, "  %u NEW", (unsigned)r.unread); t.setTextColor(Theme::WHITE, rb); t.print(u); }
             t.setTextColor(Theme::blend(Theme::BG, Theme::WHITE, 120), rb);
@@ -454,7 +467,7 @@ void uiLoraChatTick(TFT_eSPI& t, uint32_t now) {
             y += lineH + 6;
         } else {
             // A message: who, which channel (or the mark on one of ours), how long ago.
-            t.setTextColor(r.mine ? Theme::blend(Theme::BG, Theme::WHITE, 200) : accent, Theme::BG);
+            t.setTextColor(r.mine ? Theme::blend(Theme::BG, Theme::WHITE, 200) : s_tab == 2 ? netCol(r.proto) : accent, Theme::BG);
             t.setCursor(6, y);
             t.print(Privacy::name(r.sender, pv, sizeof pv));
             t.setTextColor(Theme::blend(Theme::BG, Theme::WHITE, 120), Theme::BG);
@@ -487,8 +500,8 @@ bool uiLoraChatTap(int x, int y, uint32_t now) {
         const Row& r = s_rows[i];
         // The DMs list: open that conversation. The MESHTASTIC tab: start (or
         // reopen) one with whoever said that line.
-        if (s_tab == 2 && !s_peer) { uiLoraChatOpenDm(r.peer); return true; }
-        if (s_tab == 0 && r.peer)  { uiLoraChatOpenDm(r.peer); return true; }
+        if (s_tab == 2 && !s_peer) { uiLoraChatOpenDm(r.peer, r.proto); return true; }
+        if (s_tab == 0 && r.peer)  { uiLoraChatOpenDm(r.peer, Lora::Proto::MESHTASTIC); return true; }
         return false;
     }
     return false;
@@ -518,9 +531,11 @@ void uiLoraChatKey(char c, uint32_t now) {
             if (!s_peer) { snprintf(s_status, sizeof s_status, "TAP A NAME FIRST"); s_statusAt = now; return; }
             // Queued: the row shows at once with its dots; the sniffer sends it
             // and the mark follows the ACK.
-            const bool key = Lora::dmHasKey(s_peer);
-            const uint32_t id = Lora::sendDm(s_peer, s_compose);
-            snprintf(s_status, sizeof s_status, !id ? "SEND FAILED" : key ? "SENDING..." : "ASKING FOR THEIR KEY...");
+            const bool key = Lora::dmHasKey(s_peerProto, s_peer);
+            const uint32_t id = Lora::sendDm(s_peerProto, s_peer, s_compose);
+            // MeshCore needs them as a contact first: there is no asking for a key.
+            snprintf(s_status, sizeof s_status, !id ? (s_peerProto == Lora::Proto::MESHCORE ? "NOT A CONTACT YET" : "SEND FAILED")
+                                                    : key ? "SENDING..." : "ASKING FOR THEIR KEY...");
             s_statusAt = now;
             if (id) { s_composeN = 0; s_compose[0] = '\0'; s_sig = 0xFFFFFFFFu; }
             return;
@@ -536,7 +551,7 @@ void uiLoraChatKey(char c, uint32_t now) {
         return;
     }
     if (c < 32 || c > 126) return;
-    const uint8_t cap = s_tab == 1 ? 120 : 160;      // MeshCore's text is shorter
+    const uint8_t cap = s_tab == 1 ? 120 : 160;      // MeshCore's group text is shorter; a DM takes 160 on either
     if (s_composeN < cap) { s_compose[s_composeN++] = c; s_compose[s_composeN] = '\0'; }
 }
 #else

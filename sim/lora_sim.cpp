@@ -129,6 +129,11 @@ const DmLine DMS[] = {
     { 0x3b1c9b11u, -3400000, true,  "YOU",    "is the lake trail flooded?",        3 },
     { 0x3b1c9b11u, -3600000, false, "NESSIE", "swim or hike, your call",           0 },
 };
+// And one on MeshCore, with JERSEY DVL (its key's first four bytes).
+const DmLine MC_DMS[] = {
+    { 0x4e0a7f12u,  -240000, false, "JERSEY DVL", "tower repeater is back up",     0 },
+    { 0x4e0a7f12u,  -300000, true,  "YOU",        "is the fire tower one down?",   2 },
+};
 
 // Where the chats and the nodes count back from: the capture, or on a quiet
 // band the moment it went quiet -- a line is a packet, so none is newer.
@@ -167,6 +172,17 @@ std::vector<Lora::Msgs::Msg> msgsAt(uint32_t now) {
         m.proto = Lora::Proto::MESHTASTIC; m.chan = Lora::Msgs::DM_CHAN; m.port = 1;
         m.ms = (uint32_t)t; m.rssi = -84; m.snr4 = 18; m.direct = true;
         m.peer = d.peer; m.mine = d.mine; m.dmState = d.state; m.senderId = d.mine ? 0 : d.peer;
+        snprintf(m.sender, sizeof m.sender, "%s", d.who);
+        snprintf(m.text, sizeof m.text, "%s", d.text);
+        v.push_back(m);
+    }
+    for (const DmLine& d : MC_DMS) {
+        const int64_t t = anchor() + d.at;
+        if (t < 1 || t > (int64_t)now) continue;
+        Lora::Msgs::Msg m{};
+        m.proto = Lora::Proto::MESHCORE; m.chan = Lora::Msgs::DM_CHAN; m.port = 2;
+        m.ms = (uint32_t)t; m.rssi = -79; m.snr4 = 24; m.direct = true;
+        m.peer = d.peer; m.mine = d.mine; m.dmState = d.state; m.senderId = 0;
         snprintf(m.sender, sizeof m.sender, "%s", d.who);
         snprintf(m.text, sizeof m.text, "%s", d.text);
         v.push_back(m);
@@ -334,10 +350,10 @@ bool sendText(Proto p, const char* name, const char* text, int8_t, int16_t chan)
     return true;
 }
 
-uint32_t sendDm(uint32_t to, const char* text) {
+uint32_t sendDm(Proto p, uint32_t to, const char* text) {
     if (!to || !text || !*text) return 0;
     Msgs::Msg m{};
-    m.proto = Proto::MESHTASTIC; m.chan = Msgs::DM_CHAN; m.port = 1;
+    m.proto = p; m.chan = Msgs::DM_CHAN; m.port = p == Proto::MESHCORE ? 2 : 1;
     m.ms = millis(); m.direct = true;
     m.peer = to; m.mine = true; m.pktId = 0x5000u + (uint32_t)s_sent.size(); m.dmState = 1;
     snprintf(m.sender, sizeof m.sender, "YOU");
@@ -346,8 +362,9 @@ uint32_t sendDm(uint32_t to, const char* text) {
     return m.pktId;
 }
 uint8_t dmState(uint32_t) { return 2; }
-bool    dmHasKey(uint32_t) { return true; }
-void    nodeName(uint32_t num, char* out, size_t cap) {
+bool    dmHasKey(Proto, uint32_t) { return true; }
+void    nodeName(Proto p, uint32_t num, char* out, size_t cap) {
+    if (p == Proto::MESHCORE && num == 0x4e0a7f12u) { snprintf(out, cap, "JERSEY DVL"); return; }
     for (uint8_t i = 0; i < NODE_N; i++)
         if (NODES[i].proto == Proto::MESHTASTIC && 0x3b1c9a00u + i * 0x111u == num) { snprintf(out, cap, "%s", NODES[i].name); return; }
     snprintf(out, cap, "!%08lx", (unsigned long)num);

@@ -138,7 +138,8 @@ static const uint32_t SEEN_MS = 10u * 60u * 1000u;
 // A direct message, to us or from us; the conversation is `peer`'s. The
 // same dedupe as note() by `key`.
 void noteDm(uint32_t peer, bool mine, uint32_t pktId, uint8_t dmState, const char* sender, const char* text,
-            const Packet& pk, uint32_t now, bool direct, uint8_t hops, uint32_t key);
+            const Packet& pk, uint32_t now, bool direct, uint8_t hops, uint32_t key,
+            Proto p = Proto::MESHTASTIC);
 // Our DM `pktId` has moved on (delivered, failed): its row's mark follows.
 // Returns whether a row was found.
 bool     setDmState(uint32_t pktId, uint8_t dmState);

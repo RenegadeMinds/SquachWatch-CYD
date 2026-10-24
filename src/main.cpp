@@ -9091,11 +9091,12 @@ void loop() {
                         case LoraHomeHit::TAB_MESHTASTIC:  uiLoraHomeSetNet(0); break;
                         case LoraHomeHit::TAB_MESHCORE:    uiLoraHomeSetNet(1); break;
                         case LoraHomeHit::TAB_DMS:         uiLoraHomeShowDms(); break;
-                        case LoraHomeHit::RADAR_DOT:       uiLoraChatOpenDm(uiLoraHomeTappedPeer()); enterLoraChat(); break;
+                        case LoraHomeHit::RADAR_DOT:       uiLoraChatOpenDm(uiLoraHomeTappedPeer(), uiLoraHomeTappedProto()); enterLoraChat(); break;
                         case LoraHomeHit::CHAT_DMS: {
                             // A conversation: open it; the empty part of the window: the list.
-                            const uint32_t peer = uiLoraHomeDmPeerAt(gestureStartY);
-                            if (peer) uiLoraChatOpenDm(peer); else uiLoraChatSelect(2);
+                            Lora::Proto pp = Lora::Proto::MESHTASTIC;
+                            const uint32_t peer = uiLoraHomeDmPeerAt(gestureStartY, &pp);
+                            if (peer) uiLoraChatOpenDm(peer, pp); else uiLoraChatSelect(2);
                             enterLoraChat();
                             break;
                         }

@@ -95,12 +95,17 @@ void forgetNames();
 // there. Returns its packet id, 0 when refused (no radio, LORA TX off, empty
 // text, outbox full). dmState is a Lora::Dm::State; dmHasKey whether we hold
 // that node's key (without it the DM waits while we ask for one).
-uint32_t sendDm(uint32_t to, const char* text);
+// MeshCore too (include/lora_mcdm.h): `to` is the first four bytes of the
+// contact's key, and "has a key" means "is a contact" -- a node we have
+// heard advertise. Without that a MeshCore DM is refused, since nothing
+// would open it.
+uint32_t sendDm(Proto p, uint32_t to, const char* text);
 uint8_t  dmState(uint32_t id);
-bool     dmHasKey(uint32_t num);
+bool     dmHasKey(Proto p, uint32_t num);
 // A Meshtastic node's short name as its NodeInfo gave it (Lora::Names), else
-// its number, "!27cc63cc".
-void     nodeName(uint32_t num, char* out, size_t cap);
+// its number, "!27cc63cc"; a MeshCore contact's advertised name, else the
+// first bytes of its key.
+void     nodeName(Proto p, uint32_t num, char* out, size_t cap);
 // CHANNELS on the same page: add one through the console's own path (LORA
 // CHAN: checked, added, stored), drop a user's row by its channelRow number
 // (a built-in refuses), and a saved key as its first and last four characters
@@ -269,10 +274,10 @@ inline bool sendText(Proto, const char*, const char*, int8_t, int16_t = -1) { re
 inline void identityChanged() {}
 inline void clearChats() {}
 inline void forgetNames() {}
-inline uint32_t sendDm(uint32_t, const char*) { return 0; }
+inline uint32_t sendDm(Proto, uint32_t, const char*) { return 0; }
 inline uint8_t  dmState(uint32_t) { return 0; }
-inline bool     dmHasKey(uint32_t) { return false; }
-inline void     nodeName(uint32_t num, char* out, size_t cap) { if (cap) snprintf(out, cap, "!%08lx", (unsigned long)num); }
+inline bool     dmHasKey(Proto, uint32_t) { return false; }
+inline void     nodeName(Proto, uint32_t num, char* out, size_t cap) { if (cap) snprintf(out, cap, "!%08lx", (unsigned long)num); }
 inline bool channelAdd(Proto, const char*, const char*, char* msg, size_t cap) { if (msg && cap) msg[0] = '\0'; return false; }
 inline bool channelDropRow(uint8_t) { return false; }
 inline void channelKeyPreview(uint8_t, char* out, size_t cap) { if (cap) out[0] = '\0'; }

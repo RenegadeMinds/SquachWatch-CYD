@@ -1101,7 +1101,9 @@ int main(int argc, char** argv) {
         simLoraPick(lc.net);
         uiLoraChatSelect(tabIdx == 2 ? 2 : lc.net);
         // --tab 2: the DMs list; SQUACHSIM_DMPEER=3b1c9a00 opens that conversation.
-        if (const char* dp = getenv("SQUACHSIM_DMPEER")) uiLoraChatOpenDm((uint32_t)strtoul(dp, nullptr, 16));
+        // SQUACHSIM_DMNET=1: that conversation is on MeshCore (4e0a7f12 is JERSEY DVL).
+        if (const char* dp = getenv("SQUACHSIM_DMPEER"))
+            uiLoraChatOpenDm((uint32_t)strtoul(dp, nullptr, 16), getenv("SQUACHSIM_DMNET") ? Lora::Proto::MESHCORE : Lora::Proto::MESHTASTIC);
         uiLoraChatInit(frame);
     }
     else if (screen == "lorasettings") {

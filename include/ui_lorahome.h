@@ -20,6 +20,7 @@
 #pragma once
 #include <TFT_eSPI.h>
 #include <stdint.h>
+#include "lora_pkt.h"
 
 enum class LoraHomeHit : uint8_t { NONE = 0, CHAT_MESHTASTIC, CHAT_MESHCORE, SWITCH, CHATS, BACK,
                                    TAB_MESHTASTIC, TAB_MESHCORE, SETTINGS, CHANNEL, TAB_DMS, CHAT_DMS, RADAR_DOT };
@@ -40,9 +41,10 @@ void        uiLoraHomeSetNet(uint8_t net);
 // The DMs tab of the chat window, and the conversation on the row at `y`
 // (0 = no row there).
 void        uiLoraHomeShowDms();
-uint32_t    uiLoraHomeDmPeerAt(int y);
+uint32_t    uiLoraHomeDmPeerAt(int y, Lora::Proto* p = nullptr);
 // RADAR_DOT: the Meshtastic node whose dot on the dish was tapped.
 uint32_t    uiLoraHomeTappedPeer();
+Lora::Proto uiLoraHomeTappedProto();
 uint8_t     uiLoraHomeNet();
 // The keyboard while the page is up: printable keys type, '\b' deletes,
 // '\n' sends what is typed on the switch's network.

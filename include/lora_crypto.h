@@ -58,6 +58,23 @@ bool ccmOpen(const Aes256& k, const uint8_t nonce[13], const uint8_t* in, size_t
 bool x25519(uint8_t out[32], const uint8_t scalar[32], const uint8_t point[32]);
 void x25519Base(uint8_t pub[32], const uint8_t priv[32]);
 
+// ---- SHA-512 and Ed25519 (MeshCore's identities, 2026-10-23) -----------------
+struct Sha512Ctx { uint64_t h[8]; uint8_t buf[128]; uint64_t total; size_t fill; };
+void sha512Init(Sha512Ctx& c);
+void sha512Update(Sha512Ctx& c, const uint8_t* p, size_t n);
+void sha512Final(Sha512Ctx& c, uint8_t out[64]);
+void sha512(const uint8_t* msg, size_t len, uint8_t out[64]);
+// MeshCore keeps a key pair the way orlp's ed25519 does: the 64-byte private
+// key is SHA-512 of a 32-byte seed with its first half clamped -- the scalar
+// -- and its second half the signing nonce's prefix. The public key is the
+// standard Ed25519 one for that seed (RFC 8032).
+void ed25519KeyPair(const uint8_t seed[32], uint8_t pub[32], uint8_t prv[64]);
+void ed25519Sign(uint8_t sig[64], const uint8_t* msg, size_t len, const uint8_t pub[32], const uint8_t prv[64]);
+// orlp's ed25519_key_exchange, MeshCore's shared secret: their Ed25519 public
+// key turned into a Montgomery u, (1 + y) / (1 - y), then X25519 with our
+// scalar. The same 32 bytes from either end. False for a bad key.
+bool ed25519KeyExchange(uint8_t shared[32], const uint8_t theirPub[32], const uint8_t prv[64]);
+
 // ---- SHA-256 --------------------------------------------------------------
 void sha256(const uint8_t* msg, size_t len, uint8_t out[32]);
 // Two pieces, so a caller need not glue buffers together first.

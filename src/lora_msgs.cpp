@@ -109,11 +109,11 @@ void note(Proto p, uint8_t chan, uint8_t port, const char* sender, uint64_t send
 }
 
 void noteDm(uint32_t peer, bool mine, uint32_t pktId, uint8_t dmState, const char* sender, const char* text,
-            const Packet& pk, uint32_t now, bool direct, uint8_t hops, uint32_t key) {
+            const Packet& pk, uint32_t now, bool direct, uint8_t hops, uint32_t key, Proto p) {
     if (!s_st || !peer) return;
     const uint32_t before = s_st->total;
-    note(Proto::MESHTASTIC, DM_CHAN, 1 /* Meshtastic::PORT_TEXT */, sender, mine ? 0 : peer, text, pk, now,
-         direct, hops, key);
+    // The network's own type: Meshtastic's TEXT port, MeshCore's TXT_MSG.
+    note(p, DM_CHAN, p == Proto::MESHCORE ? 2 : 1, sender, mine ? 0 : peer, text, pk, now, direct, hops, key);
     if (s_st->total == before) return;      // a copy, dropped
     Msg& m = s_st->m[(s_st->head + CAP - 1) % CAP];
     m.peer = peer;

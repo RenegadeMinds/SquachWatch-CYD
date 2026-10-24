@@ -5,6 +5,7 @@
 #pragma once
 #include <TFT_eSPI.h>
 #include <stdint.h>
+#include "lora_pkt.h"
 
 enum class LoraChatHit : uint8_t { NONE = 0, TAB_MESHTASTIC, TAB_MESHCORE, CHANNEL, TAB_DMS };
 
@@ -14,7 +15,7 @@ void        uiLoraChatScroll(int delta);   // positive = older
 LoraChatHit uiLoraChatHit(TFT_eSPI& t, int x, int y);
 void        uiLoraChatSelect(uint8_t tab); // 0 Meshtastic, 1 MeshCore, 2 DMs (the list)
 // The DMs tab, open on the conversation with that Meshtastic node.
-void        uiLoraChatOpenDm(uint32_t peer);
+void        uiLoraChatOpenDm(uint32_t peer, Lora::Proto p = Lora::Proto::MESHTASTIC);
 // Private messages to us not yet looked at, every conversation together.
 uint16_t    uiLoraChatDmUnread();
 // A tap that is not a tab or the chip: a conversation in the DMs list (opens

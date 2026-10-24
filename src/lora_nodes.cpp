@@ -171,9 +171,13 @@ static void noteMeshtastic(const Packet& pk, uint32_t now) {
     }
 }
 
+static MeshCoreHook s_mcHook = nullptr;
+void setMeshCoreHook(MeshCoreHook fn) { s_mcHook = fn; }
+
 static void noteMeshCore(const Packet& pk, uint32_t now, uint32_t epoch) {
     MeshCore::Decoded d;
     if (!MeshCore::decode(pk, d)) return;
+    if (s_mcHook) s_mcHook(d, now);
     if (d.haveChannel) MeshCore::noteChannelHeard(d.channelIdx, now);   // opened, not necessarily text; see noteMeshtastic
     const MeshCore::Frame& f = d.f;
     // On a flood the path is the hops already TAKEN, so hops == 0 means we

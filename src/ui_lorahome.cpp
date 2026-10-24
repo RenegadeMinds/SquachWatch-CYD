@@ -205,14 +205,14 @@ void refreshSnapshot(uint32_t now, bool force) {
         bool ok = true;
         for (uint16_t i = 0; i < n; i++) {
             if (!Lora::msgAt(i, m)) { ok = false; break; }
-            if (m.proto == Lora::Proto::MESHTASTIC && m.chan == Lora::Msgs::DM_CHAN) {
+            if (m.chan == Lora::Msgs::DM_CHAN) {
                 // A DM: one row a conversation, its newest line; ours named
                 // by whom it went to.
                 count[2]++;
                 bool have = false;
-                for (uint8_t k = 0; k < kept[2] && !have; k++) have = keep[2][k].peer == m.peer;
+                for (uint8_t k = 0; k < kept[2] && !have; k++) have = keep[2][k].peer == m.peer && keep[2][k].proto == m.proto;
                 if (!have && kept[2] < lines && kept[2] < 6) {
-                    if (m.mine) Lora::nodeName(m.peer, m.sender, sizeof m.sender);
+                    if (m.mine) Lora::nodeName(m.proto, m.peer, m.sender, sizeof m.sender);
                     keep[2][kept[2]++] = m;
                 }
                 continue;
@@ -641,6 +641,7 @@ Dot      s_dots[32];
 uint8_t  s_dotN = 0;
 const int DOT_REACH = 14;
 uint32_t s_tapPeer = 0;
+Lora::Proto s_tapProto = Lora::Proto::MESHTASTIC;
 // A dot just tapped rings for a moment: on MeshCore, where there are no DMs
 // yet, that and a line in the compose box are all a tap does.
 int16_t  s_ringX = 0, s_ringY = 0;
@@ -879,7 +880,8 @@ void drawChats(TFT_eSPI& t, uint32_t now) {
         const char* who = Privacy::name(r.sender[0] ? r.sender : "?", pv, sizeof pv);
         age(now, r.ms, ago, sizeof ago);
         const uint16_t bg = i == 0 ? dim(cols[c], 22) : Theme::BG;
-        t.setTextColor(cols[c], bg); t.setCursor(8, y + 1); t.print(who);
+        // In DMs, each name in its own network's colour.
+        t.setTextColor(c == 2 ? netCol(r.proto) : cols[c], bg); t.setCursor(8, y + 1); t.print(who);
         // A conversation with something we have not read: NEW after the name.
         if (c == 2 && !r.mine && r.ms > uiLoraChatDmSeenMs(r.peer)) { t.setTextColor(Theme::WHITE, bg); t.print(" NEW"); }
         const int tx = t.getCursorX() + 6;
@@ -982,10 +984,13 @@ void uiLoraHomeInit(TFT_eSPI& t) {
 void uiLoraHomeToggleNet() { s_net = (uint8_t)(s_net ? 0 : 1); s_dmTab = false; }
 void uiLoraHomeShowDms() { s_dmTab = true; }
 uint32_t uiLoraHomeTappedPeer() { return s_tapPeer; }
-uint32_t uiLoraHomeDmPeerAt(int y) {
+Lora::Proto uiLoraHomeTappedProto() { return s_tapProto; }
+uint32_t uiLoraHomeDmPeerAt(int y, Lora::Proto* p) {
     if (!s_ps || !s_dmTab || y < CHAT_ROWS_Y) return 0;
     const int i = (y - CHAT_ROWS_Y) / CHAT_ROW_H;
-    return i < s_pKept[2] ? s_ps->keep[2][i].peer : 0;
+    if (i >= s_pKept[2]) return 0;
+    if (p) *p = s_ps->keep[2][i].proto;
+    return s_ps->keep[2][i].peer;
 }
 void uiLoraHomeStepChannel(uint32_t now) {
     if (s_dmTab) { snprintf(s_status, sizeof s_status, "TAP A NAME FIRST"); s_statusAt = now; return; }
@@ -1042,10 +1047,17 @@ LoraHomeHit uiLoraHomeHit(TFT_eSPI& t, int x, int y) {
                 const Dot& d = s_dots[best];
                 s_ringX = d.x; s_ringY = d.y; s_ringAt = millis();
                 if (d.proto == Lora::Proto::MESHTASTIC && d.id && d.id <= 0xFFFFFFFFull) {
-                    s_tapPeer = (uint32_t)d.id;
+                    s_tapPeer = (uint32_t)d.id; s_tapProto = d.proto;
                     return LoraHomeHit::RADAR_DOT;
                 }
-                snprintf(s_status, sizeof s_status, "MESHCORE DMs: NOT YET");
+                // A MeshCore dot: its row's id is the key's first eight bytes,
+                // the conversation the first four. Only a contact can be messaged.
+                const uint32_t peer = (uint32_t)(d.id >> 32);
+                if (d.proto == Lora::Proto::MESHCORE && peer && Lora::dmHasKey(Lora::Proto::MESHCORE, peer)) {
+                    s_tapPeer = peer; s_tapProto = d.proto;
+                    return LoraHomeHit::RADAR_DOT;
+                }
+                snprintf(s_status, sizeof s_status, "NOT A CONTACT YET: NO ADVERT HEARD");
                 s_statusAt = millis();
                 return LoraHomeHit::NONE;
             }
